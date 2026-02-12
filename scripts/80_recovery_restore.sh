@@ -12,14 +12,14 @@ docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -mkdir -p /audit/recovery/$DT"
 # Leer qué DataNode se paró (si existe)
 DN_CONTAINER="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -cat /audit/incidents/$DT/datanode_stopped.txt 2>/dev/null || true" | tr -d '\r' | tail -n 1)"
 if [[ -n "${DN_CONTAINER}" ]]; then
-  echo "[recovery] Starting DataNode: $DN_CONTAINER"
+  echo "[recovery] Iniciando DataNode: $DN_CONTAINER"
   docker start "$DN_CONTAINER" >/dev/null || true
 else
   echo "[recovery] WARN: No encuentro datanode_stopped.txt en /audit/incidents/$DT. Continuo sin arrancar DN."
 fi
 
 # Esperar a que el clúster “vea” los DataNodes
-echo "[recovery] Waiting for DataNodes to be reported..."
+echo "[recovery] Esperando a que el clúster “vea” los DataNodes..."
 for i in {1..18}; do
   if docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfsadmin -report | grep -q 'Datanodes available:'"; then
     break
@@ -40,7 +40,7 @@ docker exec -i "$NN_CONTAINER" bash -lc "\
 docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -put -f /tmp/recovery_report_$DT.txt /audit/recovery/$DT/recovery_after_start.txt"
 
 # Restauración desde /backup -> /data si faltan ficheros del día
-echo "[recovery] Checking missing files in /data for dt=$DT (restore from /backup if needed)..."
+echo "[recovery] Comprobando archivos faltantes en /data para dt=$DT (restaurar desde /backup si es necesario)..."
 
 docker exec -i "$NN_CONTAINER" bash -lc "\
   restore_log=/tmp/restore_actions_$DT.log; \
