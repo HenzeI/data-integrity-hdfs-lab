@@ -110,6 +110,35 @@ export IOT_MB=512
 bash scripts/10_generate_data.sh
 ```
 
+## 5.1 Parametros HDFS
+### Ubicacion de XML de configuracion
+- Los archivos XML de configuración en este caso concreto se encuentran en `/opt/bd/hadoop-3.3.6/etc/hadoop/`.
+- Los valores `dfs.blocksize` y `dfs.replication` que estan dentro de `hdfs-site.xml`.
+- En ejecucion, los XML efectivos estan dentro del contenedor `namenode` (ruta tipica de Hadoop): `$HADOOP_HOME/etc/hadoop/` o `/etc/hadoop/`.
+- Para localizarlo en runtime:
+```bash
+docker exec -it namenode bash -lc "echo $HADOOP_CONF_DIR; ls -la $HADOOP_HOME/etc/hadoop 2>/dev/null; ls -la /etc/hadoop 2>/dev/null"
+```
+
+### Valores documentados
+- `dfs.blocksize = 64m`
+- `dfs.replication = 3`
+- Verificacion de valor efectivo en el cluster:
+```bash
+docker exec -it namenode bash -lc "hdfs getconf -confKey dfs.blocksize"
+docker exec -it namenode bash -lc "hdfs getconf -confKey dfs.replication"
+```
+
+### Justificacion tecnica (integridad vs coste)
+Es recomendable `dfs.replication=3` porque tolera la caida de un DataNode sin perdida de disponibilidad del bloque. Con 3 replicas, la re-replicacion tras incidente es mas robusta que con 1 o 2 replicas. El coste de replicacion 3 es mayor (aprox. 3x almacenamiento logico y mas trafico de red en escritura).
+Ese coste se acepta en este laboratorio porque el objetivo principal es integridad y recuperacion demostrable.
+Elegí `dfs.blocksize=64m` para generar mas bloques por archivo y observar mejor auditoria (`fsck`) y distribucion.
+Un bloque mas pequeno mejora granularidad de balanceo y pruebas didacticas, aunque incrementa metadatos en NameNode.
+Un bloque mayor reduce metadatos y puede mejorar throughput secuencial, pero da menos visibilidad en el experimento.
+HDFS usa CRC por bloque porque es muy rapido para deteccion de corrupcion en lectura/escritura de bajo nivel.
+CRC detecta errores accidentales, pero no esta pensado para trazabilidad end-to-end ni para controles criptograficos.
+SHA/MD5 a nivel aplicacion aporta verificacion extremo a extremo (origen vs destino), util para auditoria adicional.
+
 ## 6. Que hace cada script
 ### `scripts/00_bootstrap.sh`
 - Crea la estructura base en HDFS para `/data`, `/backup` y `/audit`.

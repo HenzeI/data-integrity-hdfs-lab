@@ -1,4 +1,5 @@
-# Ignora todos los archivos dentro de la carpeta data_local
+# Ignora todos los archivos dentro de la carpeta data_local y otros directorios
+docker/clusterA/notebooks/
 scripts/data_local/
 data_local/
 .venv/
