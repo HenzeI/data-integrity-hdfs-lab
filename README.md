@@ -55,30 +55,38 @@ Este laboratorio implementa un flujo reproducible de integridad de datos en Hado
 - Contenedores con nombre por defecto del compose (especialmente `namenode`).
 
 ## 4. Quickstart
-Ejecuta desde la raiz del repositorio.
 
-### 4.1 Levantar cluster Hadoop
+A continuación, siga los siguientes pasos copiando y pegando para el correcto funcionamiento del proyecto.
+
+### 4.1 Clonar el repositorio
+
+```bash
+git clone https://github.com/HenzeI/data-integrity-hdfs-lab.git
+```
+Acceder a la carpeta del repositorio
+
+### 4.2 Levantar cluster Hadoop
 Normal (3 DataNodes, necesario para el incidente por defecto):
 
 > *Nota: Por defecto, el namenode **tardará 10** minutos en detectar si un datanode está caído.*
 
 ```bash
-cd docker/clusterA && docker compose up -d --scale dnnm=3
+cd data-integrity-hdfs-lab/docker/clusterA && docker compose up -d --scale dnnm=3
 ```
 Recomendado:
 
 > *Nota: Se recomienda utilizar esta opción, ya que reduce el tiempo en el que el namenode tarda en detectar si un datanode está caído a **1 minuto.***
 
 ```bash
-cd docker/clusterA && docker compose -f docker-compose.yml -f docker-compose-fast.yml up -d --scale dnnm=3
+cd data-integrity-hdfs-lab/docker/clusterA && docker compose -f docker-compose.yml -f docker-compose-fast.yml up -d --scale dnnm=3
 ```
 
-### 4.2 Ejecutar pipeline completo con un solo comando
+### 4.3 Ejecutar pipeline completo con un solo comando
 ```bash
 bash ../../scripts/90_run.sh
 ```
 
-### 4.3 Ejecutar pipeline paso a paso (opcional)
+### 4.4 Ejecutar pipeline paso a paso (opcional)
 ```bash
 bash scripts/00_bootstrap.sh
 bash scripts/10_generate_data.sh
