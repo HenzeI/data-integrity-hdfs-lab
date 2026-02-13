@@ -27,13 +27,17 @@ gen_logs() {
 
   # Generar datos hasta alcanzar tamaño objetivo
   while [ "$(wc -c < "$LOG_FILE")" -lt "$target_bytes" ]; do
-    awk -v n=10000 '
+
+    # Obtener timestamp una sola vez por lote
+    TS=$(date +%Y-%m-%dT%H:%M:%S)
+
+    awk -v n=10000 -v ts="$TS" '
       BEGIN {
         srand();
         actions[1]="login"; actions[2]="logout"; actions[3]="purchase"; actions[4]="view";
         actions[5]="download"; actions[6]="upload"; actions[7]="search";
+
         for (i=1; i<=n; i++) {
-          ts=strftime("%Y-%m-%dT%H:%M:%S");
           uid=int(100000*rand());
           action=actions[int(1+7*rand())];
           status=(rand()<0.98)?"OK":"ERR";
@@ -49,20 +53,36 @@ gen_iot() {
   local target_bytes=$((target_mb * 1024 * 1024))
   : > "$IOT_FILE"
   echo "[generate] Generando iot ~${target_mb}MB..."
+
   while [ "$(wc -c < "$IOT_FILE")" -lt "$target_bytes" ]; do
-    awk -v n=10000 '
+
+    TS=$(date +%Y-%m-%dT%H:%M:%S)
+
+    awk -v n=10000 -v ts="$TS" '
       BEGIN {
         srand();
-        metrics[1]="temp"; metrics[2]="humidity"; metrics[3]="pressure"; metrics[4]="vibration";
+        metrics[1]="temp";
+        metrics[2]="humidity";
+        metrics[3]="pressure";
+        metrics[4]="vibration";
+
         for (i=1; i<=n; i++) {
-          ts=strftime("%Y-%m-%dT%H:%M:%S");
+
           did=int(100000*rand());
           metric=metrics[int(1+4*rand())];
-          value=(metric=="temp")?(15+20*rand()):
-                 (metric=="humidity")?(30+60*rand()):
-                 (metric=="pressure")?(900+200*rand()):
-                 (0.1+5*rand());
-          printf "{\"deviceId\":\"dev-%05d\",\"ts\":\"%s\",\"metric\":\"%s\",\"value\":%.2f}\n", did, ts, metric, value;
+
+          if (metric=="temp") {
+            value=15+20*rand();
+          } else if (metric=="humidity") {
+            value=30+60*rand();
+          } else if (metric=="pressure") {
+            value=900+200*rand();
+          } else {
+            value=0.1+5*rand();
+          }
+
+          printf "{\"deviceId\":\"dev-%05d\",\"ts\":\"%s\",\"metric\":\"%s\",\"value\":%.2f}\n",
+                 did, ts, metric, value;
         }
       }' >> "$IOT_FILE"
   done
@@ -76,5 +96,4 @@ echo "[generate] Tamaño final:"
 
 # Mostrar tamaños finales
 ls -lh "$LOG_FILE" "$IOT_FILE"
-
 echo "[generate] OK"
