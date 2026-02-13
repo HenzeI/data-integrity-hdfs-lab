@@ -1,20 +1,47 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 NN_CONTAINER=${NN_CONTAINER:-namenode}
 DT=${DT:-$(date +%F)}
 
-# Patron para elegir un datanode automáticamente
-DN_NAME_FILTER=${DN_NAME_FILTER:-dnnm-3}
+# Patron para elegir un datanode automaticamente
+DN_NAME_FILTER=${DN_NAME_FILTER:-dnnm-2}
 
-# Tiempo máximo de espera para que el NameNode marque el DN como muerto (segundos)
-WAIT_DEAD_TIMEOUT=${WAIT_DEAD_TIMEOUT:-600}   # 10 min
-# Cada cuánto comprobar (segundos)
+# Cada cuanto comprobar (segundos)
 WAIT_DEAD_INTERVAL=${WAIT_DEAD_INTERVAL:-10}
+
+# Tiempo maximo de espera para que el NameNode marque el DN como muerto (segundos).
+# Se calcula desde heartbeat/recheck del NameNode:
+# - deteccion rapida (~1-2 min)  -> 100s
+# - deteccion normal/lenta (>=~10 min) -> 900s
+RECHECK_INTERVAL_MS_RAW="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs getconf -confKey dfs.namenode.heartbeat.recheck-interval 2>/dev/null || true" | tr -d '\r')"
+HEARTBEAT_INTERVAL_S_RAW="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs getconf -confKey dfs.heartbeat.interval 2>/dev/null || true" | tr -d '\r')"
+RECHECK_INTERVAL_MS="${RECHECK_INTERVAL_MS_RAW:-0}"
+HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S_RAW:-0}"
+[[ "$RECHECK_INTERVAL_MS" =~ ^[0-9]+$ ]] || RECHECK_INTERVAL_MS=0
+[[ "$HEARTBEAT_INTERVAL_S" =~ ^[0-9]+$ ]] || HEARTBEAT_INTERVAL_S=0
+
+RECHECK_INTERVAL_S=$(( (RECHECK_INTERVAL_MS + 999) / 1000 ))
+# Estimacion simple del tiempo de deteccion: recheck domina, con respaldo por heartbeat.
+DETECTION_EST_S=$RECHECK_INTERVAL_S
+if (( HEARTBEAT_INTERVAL_S > DETECTION_EST_S )); then
+  DETECTION_EST_S=$HEARTBEAT_INTERVAL_S
+fi
+
+if (( DETECTION_EST_S <= 120 )); then
+  AUTO_WAIT_DEAD_TIMEOUT=100
+else
+  AUTO_WAIT_DEAD_TIMEOUT=900
+fi
+
+# Permitir override manual por variable de entorno.
+WAIT_DEAD_TIMEOUT=${WAIT_DEAD_TIMEOUT:-$AUTO_WAIT_DEAD_TIMEOUT}
 
 echo "[incident] DT=$DT"
 echo "[incident] NN_CONTAINER=$NN_CONTAINER"
 echo "[incident] DN_NAME_FILTER=$DN_NAME_FILTER"
+echo "[incident] heartbeat.interval=${HEARTBEAT_INTERVAL_S}s recheck.interval=${RECHECK_INTERVAL_MS}ms (~${RECHECK_INTERVAL_S}s)"
+echo "[incident] DETECTION_EST_S=${DETECTION_EST_S}s AUTO_WAIT_DEAD_TIMEOUT=${AUTO_WAIT_DEAD_TIMEOUT}s"
 echo "[incident] WAIT_DEAD_TIMEOUT=${WAIT_DEAD_TIMEOUT}s (interval=${WAIT_DEAD_INTERVAL}s)"
 
 # Elegir un DataNode "real" por nombre de contenedor
@@ -26,7 +53,7 @@ if [[ -z "${DN_CONTAINER}" ]]; then
 fi
 echo "[incident] Contenedor DataNode seleccionado: $DN_CONTAINER"
 
-# Crear carpeta de auditoría del incidente en HDFS
+# Crear carpeta de auditoria del incidente en HDFS
 docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -mkdir -p /audit/incidents/$DT"
 
 # Capturar estado previo (dfsadmin report + fsck)
@@ -38,27 +65,35 @@ docker exec -i "$NN_CONTAINER" bash -lc "\
 
 docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -put -f /tmp/incident_before_$DT.txt /audit/incidents/$DT/incident_before.txt"
 
+# Contadores previos para comparacion robusta
+initial_live_count="$(docker exec -i "$NN_CONTAINER" bash -lc "sed -n 's/^Live datanodes (\\([0-9][0-9]*\\)).*/\\1/p' /tmp/incident_before_$DT.txt | head -n 1" | tr -d '\r' || true)"
+if [[ -z "${initial_live_count}" ]] || ! [[ "${initial_live_count}" =~ ^[0-9]+$ ]]; then
+  initial_live_count=0
+fi
+echo "[incident] Live DataNodes antes del incidente: $initial_live_count"
+
+# Identidad del DataNode para localizarlo en el report
+DN_HOSTNAME="$(docker inspect -f '{{.Config.Hostname}}' "$DN_CONTAINER" 2>/dev/null || true)"
+DN_IP="$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DN_CONTAINER" 2>/dev/null || true)"
+echo "[incident] DN_HOSTNAME=$DN_HOSTNAME"
+echo "[incident] DN_IP=$DN_IP"
+
+# Obtener el Name: host:puerto del DataNode parado usando el report BEFORE
+STOPPED_DN_NAME="$(docker exec -i "$NN_CONTAINER" bash -lc "\
+  awk '/^Name: /{name=\$2} /^Hostname: /{host=\$2; if (host==\"$DN_HOSTNAME\" || name ~ /^$DN_IP:/) print name}' /tmp/incident_before_$DT.txt | head -n 1" | tr -d '\r' || true)"
+
+if [[ -n "${STOPPED_DN_NAME}" ]]; then
+  echo "[incident] Name detectado para DN detenido: $STOPPED_DN_NAME"
+else
+  echo "[incident] WARN: No pude detectar el Name exacto del DN. Usare comprobacion general (live/dead)."
+fi
+
 # Parar 1 DataNode (incidente)
 echo "[incident] Deteniendo DataNode: $DN_CONTAINER"
 docker stop "$DN_CONTAINER" >/dev/null
 
-# Obtener el "Name:" (host:puerto) del DN parado desde el dfsadmin report BEFORE
-#    Esto nos permite buscarlo luego dentro de "Live datanodes" / "Dead datanodes".
-STOPPED_DN_NAME="$(docker exec -i "$NN_CONTAINER" bash -lc "\
-  hdfs dfsadmin -report | \
-  awk '/^Name: /{name=\$2} /^Hostname: /{host=\$2} { \
-    if (host ~ /'"$DN_NAME_FILTER"'/) print name \
-  }' | head -n 1" | tr -d '\r' || true)"
-
-# Si no se pudo extraer, no pasa nada: seguiremos con un criterio más general
-if [[ -n "${STOPPED_DN_NAME}" ]]; then
-  echo "[incident] Nombre de DN detenido detectado (del informe): $STOPPED_DN_NAME"
-else
-  echo "[incident] WARN: No pude detectar el 'Name:' del DN a partir del report. Usaré comprobación general."
-fi
-
-# Esperar activamente a que el NameNode lo detecte (dead o no-live)
-echo "[incident] Esperando a que HDFS detecte que DataNode está inactivo..."
+# Esperar activamente a que el NameNode lo detecte como dead
+echo "[incident] Esperando a que HDFS detecte que DataNode esta inactivo..."
 start_ts=$(date +%s)
 marked_dead="no"
 
@@ -66,36 +101,37 @@ while true; do
   now_ts=$(date +%s)
   elapsed=$((now_ts - start_ts))
 
-  # Sacar un snapshot corto del report para evidenciar cambios
-  docker exec -i "$NN_CONTAINER" bash -lc "\
+  live_count="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfsadmin -report | sed -n 's/^Live datanodes (\\([0-9][0-9]*\\)).*/\\1/p' | head -n 1" 2>/dev/null | tr -d '\r' || true)"
+  dead_count="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfsadmin -report | sed -n 's/^Dead datanodes (\\([0-9][0-9]*\\)).*/\\1/p' | head -n 1" 2>/dev/null | tr -d '\r' || true)"
+  [[ "$live_count" =~ ^[0-9]+$ ]] || live_count=-1
+  [[ "$dead_count" =~ ^[0-9]+$ ]] || dead_count=-1
+
+  echo "[incident] Espera... elapsed=${elapsed}s live=${live_count} dead=${dead_count}"
+
+  # Snapshot corto para evidencia
+docker exec -i "$NN_CONTAINER" bash -lc "\
     echo '--- DFSADMIN REPORT SNAPSHOT ---'; \
     hdfs dfsadmin -report | egrep -i 'Live datanodes|Dead datanodes|Datanodes available|Name:|Hostname:|Last contact' | head -n 120" \
     > "/tmp/dfsadmin_snapshot_${DT}.txt" || true
 
-  # Lógica de detección:
-  #  - Si tenemos STOPPED_DN_NAME: comprobar si aparece bajo "Dead datanodes"
-  #  - Si no: comprobar si el número de Live datanodes baja (cuando el NN lo marca dead)
   if [[ -n "${STOPPED_DN_NAME}" ]]; then
     if docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfsadmin -report | awk '/^Dead datanodes/{f=1} f{print}' | grep -q \"$STOPPED_DN_NAME\""; then
       marked_dead="yes"
-      echo "[incident] OK: NameNode muestra el DataNode como DEAD (muerto).: $STOPPED_DN_NAME"
+      echo "[incident] OK: NameNode muestra el DataNode como DEAD: $STOPPED_DN_NAME"
       break
     fi
   else
-    # método alternativo: esperar a que "Live datanodes" refleje caída
-    live_count="$(docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfsadmin -report | awk '/^Live datanodes/{print \$3}' | head -n 1" 2>/dev/null | tr -d '\r' || true)"
-    # si puede parsear y es un número, y es < 3 (o < total), lo damos por detectado
-    if [[ -n "$live_count" ]] && [[ "$live_count" =~ ^[0-9]+$ ]] && (( live_count < 3 )); then
+    if (( initial_live_count > 0 )) && (( live_count >= 0 )) && (( dead_count >= 0 )) && \
+       (( live_count < initial_live_count )) && (( dead_count >= 1 )); then
       marked_dead="yes"
-      echo "[incident] OK: Disminución de los nodos de datos en vivo (now=$live_count)."
+      echo "[incident] OK: NameNode refleja incidente (live=$live_count dead=$dead_count)."
       break
     fi
   fi
 
-  # Timeout
   if (( elapsed >= WAIT_DEAD_TIMEOUT )); then
-    echo "[incident] WARN: Timeout esperando a que el NameNode marque el DN como DEAD (${WAIT_DEAD_TIMEOUT}s)."
-    echo "[incident] Continuo igualmente (puede salir aún 'HEALTHY' en fsck si no ha expirado el heartbeat)."
+    echo "[incident] WARN: Timeout esperando que NameNode marque DEAD (${WAIT_DEAD_TIMEOUT}s)."
+    echo "[incident] Continuo igualmente; revisa heartbeat/recheck o aumenta WAIT_DEAD_TIMEOUT."
     break
   fi
 
@@ -116,8 +152,8 @@ docker exec -i "$NN_CONTAINER" bash -lc "\
 
 docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -put -f /tmp/incident_during_$DT.txt /audit/incidents/$DT/incident_during.txt"
 
-# Guardar qué DataNode paré (para el script 80)
+# Guardar que DataNode pare (para el script 80)
 docker exec -i "$NN_CONTAINER" bash -lc "echo '$DN_CONTAINER' > /tmp/incident_datanode_$DT.txt"
 docker exec -i "$NN_CONTAINER" bash -lc "hdfs dfs -put -f /tmp/incident_datanode_$DT.txt /audit/incidents/$DT/datanode_stopped.txt"
 
-echo "[incident] OK (DataNode detenido). A continuación: ejecute scripts/80_recovery_restore.sh"
+echo "[incident] OK (DataNode detenido). A continuacion: ejecute scripts/80_recovery_restore.sh"

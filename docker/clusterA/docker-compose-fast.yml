@@ -1,0 +1,10 @@
+# Configuración en el archivo hdfs-site.xml reducir el tiempo
+# en el que el namenode detecta que un datanode esta caido 
+services:
+  namenode:
+    volumes:
+      - ./conf-fast/hdfs-site.xml:/opt/bd/hadoop-3.3.6/etc/hadoop/hdfs-site.xml
+
+  dnnm:
+    volumes:
+      - ./conf-fast/hdfs-site.xml:/opt/bd/hadoop-3.3.6/etc/hadoop/hdfs-site.xml
